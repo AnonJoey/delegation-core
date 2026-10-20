@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delegation-core"
+version = "0.16.1"
+description = "Local MCP delegation server: llama.cpp + BGE + SQLite vector index + Obsidian vault"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jordan Bernardes"}]
+requires-python = ">=3.11"
+dependencies = [
+    # floor verified against actual API usage: client_tracking.py imports
+    # fastmcp.server.middleware.{Middleware,MiddlewareContext}, which does not
+    # exist before fastmcp 2.9.0 (older 0.x/2.0-2.8 releases have no
+    # server/middleware package at all) — a resolver that picked anything in
+    # the old >=0.4.0 range would fail on import at server startup.
+    # Upper bound added in v0.11: 3.x is what is actually installed and tested
+    # against, and it is not source-compatible with 2.x — streamable_http_app()
+    # and sse_app() are gone, replaced by http_app(), and FastMCP.__init__ grew
+    # the auth= parameter this server now depends on. The old floor-only range
+    # let a resolver pick either major.
+    "fastmcp>=3.4,<4",
+    # Indice vetorial: SQLite (stdlib) + numpy, em indice_sqlite.py. O ChromaDB saiu
+    # das dependencias obrigatorias: so e preciso para ler um indice antigo e migrar
+    # (extra "chroma"), porque a 1.5.9 tem defeitos de corrupcao abertos.
+    "numpy>=1.21",
+    "sentence-transformers>=3.0.0",
+    "requests>=2.32.0",
+    "httpx>=0.27.0",
+    "rich>=13.0.0",
+    # cross-platform "find/stop the llama.cpp process regardless of what
+    # started it" for the dashboard's start/stop button (dashboard_api.py)
+    "psutil>=5.9.0",
+    # file format extraction
+    "pypdf>=4.0.0",
+    "python-docx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=0.6.23",
+    "beautifulsoup4>=4.12.0",
+    # sidecar YAML support
+    "pyyaml>=6.0",
+]
+
+# v5.1: web search is opt-in. It reaches the public internet (DuckDuckGo),
+# which is outside delegation-core's local-only design, so its dependency is
+# not installed by default. Enable with:  pip install "delegation-core[web]"
+# and set web_search_enabled=true in config.json.
+# Uses `ddgs` — the maintained rename of `duckduckgo-search`, which now returns
+# 0 results under the old name.
+#
+# v0.7.0: code-graph pipeline vendored from Graphify (github.com/Graphify-Labs/graphify,
+# core pipeline + all language extractors — see delegation_core/graph/__init__.py).
+# Opt-in via pip install "delegation-core[graph]" — it adds ~27 native tree-sitter
+# wheels, a real weight increase for a capability most installs won't use.
+# tree-sitter-dm (BYOND DreamMaker) ships no Linux/Mac prebuilt wheel and needs a
+# C toolchain to compile, unlike every other language binding here, so it stays
+# in its own graph-dm extra rather than breaking a plain [graph] install.
+[project.optional-dependencies]
+chroma = ["chromadb>=0.5.0"]
+web = ["ddgs>=6.0.0"]
+graph = [
+    "networkx>=3.4",
+    "numpy>=1.21",
+    "rapidfuzz>=3.0",
+    "tree-sitter>=0.23.0,<0.26",
+    "tree-sitter-python>=0.23,<0.26",
+    "tree-sitter-javascript>=0.23,<0.26",
+    "tree-sitter-typescript>=0.23,<0.25",
+    "tree-sitter-go>=0.23,<0.26",
+    "tree-sitter-rust>=0.23,<0.25",
+    "tree-sitter-java>=0.23,<0.25",
+    "tree-sitter-groovy>=0.1,<0.3",
+    "tree-sitter-c>=0.23,<0.25",
+    "tree-sitter-cpp>=0.23,<0.25",
+    "tree-sitter-ruby>=0.23,<0.25",
+    "tree-sitter-c-sharp>=0.23,<0.25",
+    "tree-sitter-kotlin>=1.0,<2.0",
+    "tree-sitter-scala>=0.23,<0.27",
+    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-swift>=0.7,<0.9",
+    "tree-sitter-lua>=0.2,<0.6",
+    "tree-sitter-zig>=1.0,<2.0",
+    "tree-sitter-powershell>=0.26,<0.28",
+    "tree-sitter-elixir>=0.3,<0.5",
+    "tree-sitter-objc>=3.0,<4.0",
+    "tree-sitter-julia>=0.23,<0.25",
+    "tree-sitter-verilog>=1.0,<2.0",
+    "tree-sitter-fortran>=0.6,<0.8",
+    "tree-sitter-bash>=0.23,<0.27",
+    "tree-sitter-json>=0.23,<0.26",
+    "tree-sitter-pascal",
+    "tree-sitter-sql",
+    "tree-sitter-hcl",
+]
+graph-dm = ["tree-sitter-dm"]
+dev = ["pytest>=8.0", "ruff>=0.6", "chromadb>=0.5.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[project.scripts]
+delegation-core = "delegation_core.cli:main"
+delegation-core-hook = "delegation_core.hooks.entrada:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

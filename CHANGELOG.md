@@ -1,0 +1,479 @@
+# Changelog
+
+All notable changes to the Delegation-Core Office project (v0.1.0 to v0.15.0) are documented in this file.
+This changelog is derived directly from the canonical versioning recorded across the codebase and vault archives.
+
+---
+
+## Nao lancado - A API do dashboard na 8788 passa a exigir o bearer token, e a sondagem do daemon deixa de depender de uma unica leitura
+
+### Security
+- **Toda requisicao a API do dashboard exige `Authorization: Bearer <server_token>`, o mesmo segredo da porta MCP.** Medido em 14/10/2026 contra o daemon real: `GET /api/status`, `/api/processes` e `/api/vault/tree` responderam 200 sem credencial, e as rotas POST (`/api/vault/note/save`, `/api/llama/start`, `/api/config/update`) so tinham como defesa o loopback e a lista de Origin. Isso nao protege de um processo local qualquer, e nao protege de nada quando `server_host` deixa de ser `127.0.0.1`, que e o caso do daemon num servidor. O preflight CORS continua isento (o navegador o envia sem credencial e ele nao concede nada), a comparacao e em tempo constante e sobre bytes (um cabecalho nao ASCII dava `TypeError` com `str`), e um `_token` vazio rejeita tudo em vez de admitir tudo. O 401 leva o cabecalho CORS para o webview conseguir ler o erro. `tests/test_dashboard_api_auth.py` cobre sem credencial, errada, malformada, esquema em minuscula, token vazio e o preflight, e com a checagem desligada 9 dos 12 testes falham. O app Tauri le o token do `config.json` e o entrega ao webview pelo comando `get_api_token`.
+
+### Added
+- **Multiple-path ingestion sources.** A declarative source can now use the
+  legacy `path` form for one root or `paths` to group directories and files
+  under one logical name, with recursion and exclusions per path. The
+  configuration guide includes examples of both forms.
+- **Configurable transcript policy.** `session_transcripts.mode` accepts
+  `automatic`, `manual`, and `off`. In manual mode, `session capture-next
+  --client claude|codex|any` authorizes only the next session for the selected
+  target. The installer registers session-end hooks for Claude Code and Codex;
+  Codex dispatches export to a local worker to respect its short hook timeout.
+- **Codex session parity.** Codex now also receives the SessionStart vault
+  briefing and protocol direction. The installer registers both local hooks and
+  places the bundled delegation-core-office skill in `~/.agents/skills/`, preserving
+  a same-named user-owned skill.
+
+### Fixed
+- **O modo `off` da captura de transcript ainda gravava o transcript cru quando a sessao era do Codex.** O hook de fim de sessao do Codex copiava o rollout, sem redacao, para `session_hook_payloads/` antes de consultar a politica, e deixava a copia la para sempre se o worker nao rodasse (reinicio, kill, falha ao iniciar). Medido: com `mode=off` e um worker que nao roda, a copia ficava no disco com o texto original. Agora a politica e consultada antes de copiar (`off`, ou `manual` sem pedido para o Codex, nao copia nada e o worker so recebe o que precisa para parar o modelo local), uma falha ao iniciar o worker apaga o que foi criado, e todo fim de sessao do Codex varre o que tem mais de um dia. `session-end-file` so aceita e so apaga arquivos dentro de `session_hook_payloads/`.
+- **Os testes do instalador criavam o `~/.codex/hooks.json` real de quem os roda.** `conftest._sem_escrita_no_estado_real` isolava `CLAUDE_SETTINGS` mas nao `CODEX_HOOKS`, e como a constante e calculada no import, trocar `Path.home` nao a alcancava. Medido em 19/10/2026: rodar os testes do PR 47 criou o arquivo na home, com os dois hooks apontando para o venv do checkout, e o Codex da maquina passaria a dispara-los. O `conftest` agora reaponta `CODEX_HOOKS`, e `test_a_suite_nao_enxerga_o_hooks_json_real_do_codex` falha sem isso.
+- **Quem instala o Codex depois do delegation-core encontra os hooks e a skill no lugar**, e isso agora tem teste (`test_os_hooks_do_codex_ja_estao_no_lugar_quando_o_codex_chega_depois` e o do `post_install` sem `~/.codex`) para que ninguem condicione o registro a presenca do Codex. O fim do wizard e `docs/INGEST_CONFIGURATION.md` dizem o que falta nesse caso: `delegation-core clients --codex` e `/hooks`.
+- **O instalador copiava as 19 skills do repositorio para `~/.agents/skills/` do Codex, nao so a nova.** Agora so a `delegation-core` (`CODEX_SKILLS` em `installer.py`); as outras continuam em `~/.claude/skills`.
+- **O `SKILL.md` da `delegation-core` mandava chamar `heartbeat` com objetivo e status**, mas `heartbeat` so aceita `force`. Corrigido, com `process_create` e `process_update` para o trabalho que dura varias sessoes.
+- **A nota de transcript do Codex abria com o bloco `<environment_context>` como se fosse a primeira fala do usuario**, e dele saia o assunto da nota. O bloco que o proprio Codex grava deixa de entrar.
+- **`trust_review_required` era sempre verdadeiro**, e o `post-install` mandava revisar o hook do Codex mesmo quando nada tinha sido escrito. `register_codex_session_hook` tambem deixa de aceitar o parametro `executable`, que nunca foi usado.
+- **`index-migrate` reprovava uma busca correta quando trechos de nota igual empatavam no 10o lugar.** A verificacao comparava o CONJUNTO de ids do top 10 contra a busca exata; o mesmo texto em duas notas da o mesmo vetor, e qualquer desempate entre eles e valido, mas dois algoritmos corretos escolhem diferente. Uma instalacao reprovou duas vezes ("11 consultas diferem da busca exata", 39 de 50) com as 10.077 linhas identicas em texto, metadados e vetores, e ativou o indice a mao. Reproduzido com quase-duplicatas sinteticas (a verificacao antiga reprova 8 de 50 num indice correto) e medido num indice real (3,6% dos vetores repetidos; 11 de 1.049 consultas divergem, todas com a nota do 10o igual a do 11o). Agora a verificacao compara as NOTAS posicao a posicao (tolerancia 1e-5, float64 contra float32) e confere que a distancia que o indice declara e a do trecho que devolveu; o relatorio ganha `consultas_com_empate`, e uma reprovacao diz a maior diferenca de nota. Uma busca sabotada (sem o melhor resultado, ou com a distancia errada) continua reprovada.
+- **O `doctor` chamava de "indice legado abandonado" o backup que o `update` e o `index-migrate` guardam, e o `--clean-orphans` o apagava sem aviso.** O aviso agora nomeia cada pasta e diz quais sao backup; `--clean-orphans` deixa os `.chroma*-backup-*` de fora (e o caminho de volta) e `--clean-orphans --include-backups` os remove de proposito.
+- **A sondagem do daemon no dashboard lia 64 bytes numa unica chamada `read()`.** Uma leitura devolve o que ja chegou, nao o que foi pedido: um short read legitimo ("HTTP/1.") reprovava o `starts_with("HTTP/1.x 200")`, o daemon era dado como ausente e o app subia o proprio sidecar, uma segunda copia do BGE-m3 (2314 MiB de VRAM) para responder o que o daemon ja respondia. Agora le ate o fim da linha de status, com teto de 256 bytes. Os testes de `lib.rs` dividem a resposta em todos os tamanhos de leitura e usam um socket que responde em pedacos com pausas; com a leitura unica restaurada, 3 dos 5 falham. Quando nao ha token para apresentar ao daemon, o app cai no sidecar, que gera um, em vez de tratar um 401 como "respondeu".
+- **No Windows, uma janela de console abria toda vez que o dashboard abria e outra ficava aberta para o daemon.** Tres causas, todas da mesma regra do Windows: um programa de console lancado por um processo SEM console ganha um console novo e visivel, mesmo com a saida capturada. (1) O dashboard (app Tauri, sem console) lancava `python.exe` com `Command::new` sem `CREATE_NO_WINDOW`; a janela ficava aberta enquanto o sidecar vivesse. (2) O daemon subia por `python.exe -m delegation_core run`, na tarefa agendada e no `.cmd` da pasta Inicializar, que rodava em primeiro plano; agora sobe por `pythonw.exe` (o mesmo interpretador do venv, sem console) e o `.cmd` so dispara o daemon e fecha. `delegation-core service install --visible` mantem a janela, para diagnosticar um daemon que nao subiu. (3) As 30 chamadas de `subprocess` que capturam saida (`schtasks`, `nvidia-smi`, `git`, `tesseract`, o `python -c` do doctor, `pip`...) piscavam uma janela cada quando o pai nao tinha console; todas passam a usar `procs.sem_janela()`, e `tests/test_sem_janela_de_console.py` reprova qualquer chamada nova que esqueca disso (as quatro excecoes sao ramos de Linux e macOS que escrevem no terminal).
+- **Sem console o daemon nao subia.** Medido em 15/10/2026 simulando `pythonw.exe` (`sys.stdout` e `sys.stderr` valendo `None`): o uvicorn pergunta `sys.stdout.isatty()` ao montar o log e cai com `Unable to configure formatter 'default'`, o daemon sai com codigo 1 e o traceback some junto, porque o stderr nao existe. `stdio_nulo.garantir_stdio()` da destino a stdin e stdout (o nulo) e ao stderr (`daemon-stderr.log`, com teto de 5 MB e um `.1`), e e a primeira coisa que `main()` faz.
+- **O launcher do `service start` no Windows abria um console novo e o deixava aberto.** Era `cmd /c start "" <launcher>`; agora o `cmd` roda oculto.
+- **No Windows o stdout de um daemon sem console passava a ser o `NUL`, e `NUL.isatty()` e True** (medido no CI, Python 3.12): o uvicorn ligaria as cores e escreveria ANSI no nada. O sorvedouro agora e um objeto nosso, com `isatty()` False nas tres plataformas. Dois testes do PR do Windows dependiam do runner (um olhava o `sys.executable` real, e o runner do Windows tem `pythonw.exe` ao lado do `python.exe`; o outro supunha `isatty()` False no `NUL`) e deixaram o job do Windows vermelho; o primeiro agora monta o proprio venv falso.
+
+## v0.16.1 (2026-10-12) - Busca exata sem copiar a matriz, textos do servidor sem ChromaDB, uma so partida do llama-server de embeddings e um teste que deixa de decidir pelo relogio
+
+### Changed
+- **A busca exata nao copia mais a matriz a cada consulta.** Medindo o indice SQLite em escala (41 mil a 400 mil trechos de 1024 dimensoes), a busca sem filtro saia mais lenta que a com filtro: `cache.matriz[idx] @ qn` indexa a matriz com um vetor de indices e isso copia as linhas escolhidas, 170 MB por busca com 41 mil trechos e 1,6 GB com 400 mil. Agora a pontuacao e calculada sobre a matriz inteira, sem copia, e so depois se escolhem as linhas permitidas. Resultado identico em 900 consultas; busca vetorial de 23,5 para 3,0 ms (41 mil trechos) e de 180 para 27 ms (400 mil), p50, com pico de memoria de 3,4 para 2,3 GB nos 400 mil. `tests/test_indice_sqlite_escala.py` falha se a consulta voltar a alocar uma fracao relevante da matriz.
+- **`doctor` avisa quando o indice SQLite passa de 500 mil trechos**, com a memoria estimada da matriz e os numeros medidos (com 400 mil: abertura a frio de 4 s, 1,9 GB e 27 ms por busca). `docs/indice-sqlite.md` traz a tabela de escala completa e diz o que pesa: a busca lexical (BM25), com 206 ms no p50 aos 400 mil trechos.
+
+### Fixed
+- **Dois processos que pediam o BGE ao mesmo tempo subiam dois `llama-server`.** O daemon e o `reindex` do hook de sessao que acordam juntos viam a porta livre ao mesmo tempo, e a trava de `EmbedServer.ensure` era so de thread. Medido com um servidor falso que demora a ligar: dois pedidos, dois processos subidos (o segundo perde a porta, mas ja carregou o modelo). Agora a partida passa por uma trava de arquivo (`embed_llama.<porta>.start.lock`, em `~/.delegation_core`) e quem espera confere de novo e usa o servidor do primeiro: um pedido, um processo. `tests/test_embed_llama.py::test_dois_pedidos_ao_mesmo_tempo_sobem_um_servidor_so` falha sem a trava. O caminho `torch` segue com um modelo por processo (cerca de 2 GB cada); unificar esse exigiria rotear a CLI e os hooks pelo daemon e nao foi feito.
+- **O teste dos escritores mortos com `kill -9` decidia pelo relogio e falhava num runner lento.** Rodava 8 s fixos e sorteava as mortes a cada volta; no Windows do CI de um PR so de documentacao cada volta levou segundos, deu menos de tres voltas e o teste falhou com "o teste nao matou ninguem", sem defeito no indice. Reproduzido emulando uma volta de 3,1 s. Agora o laco termina quando houve ao menos 6 mortes e mais de 40 lotes confirmados, com teto de 90 s; as afirmacoes finais nao mudaram.
+- **O instalador deixa de exigir o `chromadb`.** A lista de pacotes que o wizard verifica ainda o tratava como obrigatorio, embora seja opcional desde a v0.16.0, e a instalacao falhava para quem nao usa o indice antigo. Correcao de Luiz Capelin (PR 39).
+- **As descricoes das ferramentas MCP e o `--help` do CLI ainda falavam em ChromaDB depois da troca do indice.** `vault_stats` dizia "ChromaDB index size", `vault_reindex_bg` dizia "Rebuild the ChromaDB index", `write_note` explicava um detalhe de implementacao com o nome do Chroma, e o titulo do CLI e o `reindex` repetiam o nome. A descricao de uma ferramenta e o que um agente le para decidir o que ela faz, e o texto errado o faz raciocinar sobre o indice errado. Corrigido, com `tests/test_textos_do_indice.py`: nenhuma ferramenta MCP descreve o indice como ChromaDB, e o `--help` so o nomeia nos comandos cujo assunto e o indice antigo (migracao, comparacao, segmentos orfaos). O teste achou a `write_note`, que a busca por texto tinha deixado passar.
+- **O painel passa a ler `indexed_notes`.** A API de status trazia a contagem de notas indexadas como `chroma_indexed_notes`, nome de quando o indice era o Chroma. O nome neutro entra, e o antigo continua na resposta para o painel ja instalado.
+
+## v0.16.0 (2026-10-09) - Indice SQLite no lugar do ChromaDB, wizard revisado, fila local sem regravacao e o servico com stop, start e restart
+
+### Changed
+- **O indice vetorial deixa de ser o ChromaDB: agora e um arquivo SQLite com busca exata em numpy.** O ChromaDB 1.5.9, a ultima versao do PyPI, tem tres defeitos de corrupcao abertos no upstream (7510: `link_lists.bin` cresce sem limite; 7238: SIGSEGV ao carregar segmento danificado; 7678: compactacao travada depois de SIGKILL) e nenhuma correcao publicada. Ele guarda texto e metadados no SQLite e os vetores em arquivos HNSW a parte, dois repositorios sem atomicidade entre si. Medido em 07/10/2026 no cenario "longevo" (um processo segura o indice aberto e outro abre, escreve 1.200 linhas e sai, dez vezes): sete dos dez processos cairam com SIGSEGV e o indice terminou com 34.300 das 41.000 linhas esperadas. O mesmo cenario no indice novo: nenhuma queda e 53.301 de 53.301. O indice novo e `indice_sqlite.py`: uma fachada da API do ChromaDB sobre SQLite em WAL, com o texto, os metadados e o vetor na mesma transacao e a busca exata (10 a 20 ms com 41 mil chunks de 1024 dimensoes), que cada processo mantem atualizada pelo registro `mudancas`, sem reabrir cliente. O comportamento de borda foi medido no Chroma 1.5.9 e copiado (o `upsert` mescla metadados, `$ne` casa com chave ausente, `True` nao e igual a `1`), e `tests/test_indice_sqlite_diferencial.py` o compara com o proprio Chroma. Em 70 consultas reais, o indice novo nunca ficou pior que o Chroma e trouxe vizinhos mais proximos em 13 das 15 listas que diferiram: o HNSW e aproximado, o novo e exato.
+- **`index_backend` escolhe o indice (`sqlite`, `chroma` ou vazio).** Vazio decide pelo que existe em disco: um indice do Chroma com dados nunca e trocado sozinho por um vazio, e uma instalacao nova usa sqlite. O indice novo mora em `.indice_sqlite/`, ao lado do `.chroma_bge/`, que nunca e tocado.
+- **O embedder do BGE nao herda mais do chromadb.** `EmbedderSentenceTransformer`, em `embeddings.py`, gera vetores identicos aos do antigo (diferenca maxima 0,0 com o BGE-m3 real, conferida tambem contra vetores ja gravados no indice). `gpu.release_embeddings` esvazia o cache de classe dele.
+- **`chromadb` virou extra opcional** (`pip install 'delegation-core[chroma]'`), so para ler um indice antigo e migrar. O caminho de busca e escrita do SQLite roda com o `chromadb` bloqueado (`tests/test_indice_sqlite_ciclo_de_vida.py`). Sem o extra e com um indice do Chroma no disco, o aviso diz o que instalar.
+- **Um indice SQLite ilegivel vai para quarentena em vez de derrubar a abertura.** A pasta e renomeada (`.indice_sqlite-danificado-*`), nunca apagada, e o daemon reconstroi dos markdowns e das fontes ingeridas. Um banco ocupado por outro processo nao conta como dano. `recover-index` e `ingest-registry` passam a valer para o indice em uso.
+
+### Added
+- **Evals da busca, no CI.** `tests/test_evals_busca.py` mede o caminho de busca do indice SQLite (vetorial exata, lexical BM25 e hibrida RRF) sobre 40 notas e 40 perguntas, com linha de base em `tests/evals_busca/baseline.json`: o teste falha se qualquer metrica cair, e um teste de ordem de insercao evita empates que oscilariam entre sistemas. Nao mede o BGE-M3 (use `delegation-core eval-search`). Ver `docs/evals-de-busca.md`.
+- **`delegation-core index-migrate` e `index-compare`.** `index-migrate` exporta o Chroma num processo filho (abrir um indice 1.5.x pode matar quem o abre), importa para uma pasta temporaria, verifica linha a linha (contagem, ids na mesma ordem, texto, metadados, vetores bit a bit, vizinhos contra a busca exata) e so entao troca a pasta; recusa rodar com o daemon no ar. Sem `--ativar` fixa `index_backend: chroma`, para o indice novo nao ser assumido. `index-compare` roda as mesmas consultas nos dois indices. Com os dados reais: 41.314 chunks em 28 s, identicos, 50 de 50 consultas iguais a busca exata. A exportacao neutra (JSONL e `.npy`) fica em `~/.delegation_core/migracao/`.
+- **O indice SQLite acrescenta o que o ChromaDB nao tem:** `where_document` e `buscar_texto` (BM25) por FTS5 trigram, busca hibrida por fusao de ranques (RRF), backup online pela API de backup do SQLite, e `verificar()` (`PRAGMA integrity_check`, usado pelo `doctor`).
+- **Testes:** diferenciais contra o ChromaDB, o `VaultManager` inteiro nos dois backends, escritores mortos com `kill -9` com um leitor de vida longa, o cenario longevo, o verificador contra quatro tipos de estrago, e o ciclo de vida (escolha do backend, indice danificado, `recover-index`). 13 de 14 mutacoes no modulo foram pegas; a outra e equivalente. Os testes cujo assunto e o Chroma fixam o backend com a fixture `backend_chroma`.
+
+### Fixed
+- **A ingestao pulava arquivos so pelo carimbo, mesmo com o indice vazio.** O carimbo do registro (mtime e tamanho) diz que o arquivo nao mudou, nao que o indice tem as linhas dele. Com o indice recriado, esvaziado ou trocado, `ingest` devolvia "0 files" sem reembutir nada. Agora o indice e consultado uma vez por fonte, e o arquivo carimbado cujas linhas nao estao la e reembutido; o resultado traz `reindexed_missing_from_index`. Se o indice nao puder ser consultado, vale o carimbo, como antes. `tests/test_ingest_confere_o_indice.py`.
+- **`status` culpava o indice quando o daemon estava travado.** Um daemon vivo e travado ainda aceita a conexao (quem aceita e o sistema operacional); so a inicializacao da sessao estoura o tempo. Isso era tratado como "o daemon saiu": a CLI contava o indice sozinha e dizia "not initialized: run: delegation-core reindex", culpando um indice saudavel e recomendando horas de reindexacao. Novo erro `DaemonUnresponsive` (um `DaemonCallFailed`, entao a CLI nao tenta fazer o trabalho sozinha): tempo esgotado com a porta ainda aberta. Conexao recusada continua sendo `DaemonUnavailable`. A linha do `status` passou de "ChromaDB" para "Index". `tests/test_daemon_travado.py`, inclusive contra um daemon falso que aceita e nunca responde.
+- **A carga do modelo de embeddings nao tinha prazo.** Num disco lento, com os pesos num OneDrive so na nuvem ou com a rede da Hugging Face pendurada, a carga nunca voltava, e tudo que precisava do indice esperava atras dela, o `heartbeat` inclusive. Agora ela roda numa thread com prazo (`embed_load_timeout_sec`, 600 s; 0 desliga): estourado, o motivo aparece no `init_error` do `heartbeat`, e a proxima chamada continua esperando a MESMA carga em vez de iniciar outra e dobrar a memoria. `tests/test_carga_do_embedder_com_prazo.py`.
+- **`delegation-core service stop`, `start` e `restart` nao existiam, e o README, o guia do indice SQLite e quatro mensagens do proprio CLI mandavam rodar.** O argparse so aceitava `install`, `uninstall` e `status`: quem seguia a instrucao da migracao do indice recebia "invalid choice" no primeiro passo. `service.stop/start/restart` ja existiam (o `update` os usa); faltava ligar a CLI. Alem disso o `cmd_service` devolvia `1` numa falha e o `main()` descarta o retorno, entao `service` saia com 0 mesmo falhando; agora sai com 1. `tests/test_cli_service_acoes.py` tambem falha se um documento citar uma acao de `service` que nao exista.
+- **A busca padrao escondia todo arquivo ingerido num vault dominado por artigos gerados.** O padrao adaptativo caia em `scope='notes'` quando os artigos gerados pelos grafos eram maioria, e o filtro de `notes` (`kind == "note"`) tirava, junto com os gerados, todo arquivo de `ingest_folder`. Num vault com 10.103 artigos gerados de 10.565 notas, "quem e o contato da Anthropic que o usuario conheceu numa conferencia" voltava tres transcricoes sem relacao, com os documentos certos no indice. Novo escopo `notes+external` (tudo menos os artigos gerados, filtro `kind != "generated"`), que passa a ser o padrao nesse caso. Medido com 12 perguntas de resposta conhecida: `notes` 5 acertos, `all` 8 (perdia para artigos gerados), `notes+external` 9. Os escopos antigos nao mudam de significado. `tests/test_escopo_notas_e_externos.py` prende, contra o ChromaDB de verdade, que o `$ne` devolve as linhas sem `kind`.
+- **O worker do modelo local regravava a fila inteira a cada 2 segundos, ocioso.** `claim_next` gravava o `local_tasks.json` inteiro com `fsync` mesmo quando nao havia nada para rodar nem tarefa agendada para promover. Com o arquivo de 2 MB medido em 06/10/2026, sao 43.200 regravacoes por dia num daemon parado. Agora so grava quando algo mudou.
+- **Cada consulta a fila local relia o arquivo inteiro.** `local_task_status` e companhia parseavam o JSON todo a cada chamada: 5,9 ms com 545 tarefas. A fila guarda o ultimo conteudo em memoria e so rele quando o arquivo muda por fora (caminho, mtime e tamanho): 0,02 ms.
+- **22 ferramentas MCP ainda rodavam no laco de eventos.** Eram `async` sem nenhum `await`, a mesma classe do travamento de 26/09 corrigido no PR 7; entre elas as `local_task_*`. Viraram `def` (threadpool), e as que gravam configuracao (`window_open/close`, `workspace_save/apply`, `graph_hook_install/uninstall`) levam a mesma trava de escrita das outras. `tests/test_ferramentas_fora_do_laco.py` falha se uma ferramenta async sem await voltar. Medido que o cliente continua identificado no threadpool com o fastmcp instalado (3.4.2); com fastmcp 4 ele se perde em toda ferramenta, async ou nao, e o pyproject segue travando `<4`.
+- **Mac com MLX: toda geracao local falhava.** O engine mandava `"model": "local"` fixo, e o `mlx_lm.server` trata o nome como um repositorio a carregar: medido em 06/10/2026 com mlx-lm 0.32, toda chamada voltava "Cannot find an appropriate cached snapshot". Com o servidor fora do ar, o engine ainda tentava subir o llama-server com `--ctx-size` e `-fa`, que o `mlx_lm.server` recusa. Novo campo `motor_local` (`llamacpp` ou `mlx`): com `mlx`, o pedido leva `"default_model"` (o modelo que o servidor subiu com `--model`), e o engine sobe o proprio `mlx_lm.server` com `--model`, `--host`, `--port` e `--chat-template-args`, esperando ate 300 s. `llama_model` aceita o id do repositorio no Hugging Face. Testado de ponta a ponta contra o `mlx_lm.server` real, com o servidor ja no ar e com o engine subindo-o. O `mlx-lm` 0.32 ja traz as arquiteturas novas (`qwen3_5`, `gemma4`, `gpt_oss`, `llama4`, `mistral4`); `docs/INSTALL_MAC_MLX.md` atualizado.
+- **Tarefa exclusiva com argumentos diferentes sumia.** Dois `ingest_folder_bg` seguidos, de pastas diferentes, voltavam com o mesmo `job_id`, e so a primeira pasta era indexada; a resposta do segundo ainda citava a propria pasta. Medido em 05/10/2026 com duas pastas de codigo. Agora uma tarefa exclusiva so se junta a outra com os mesmos argumentos; as demais esperam em `queued` e rodam uma por vez, mantendo a regra de nunca rodar duas ingestoes juntas. As respostas dos `_bg` dizem o estado real.
+- **`update` rodava os passos finais com o codigo da versao anterior.** O processo do `update` importa os modulos antes do `git pull` e do `pip install`, entao tudo que ele chamava depois vinha da versao velha. No update para a v0.15.0 os hooks de sessao nao foram registrados e tiveram de ser registrados a mao. Agora os passos que vem depois do pip (docs, hooks, servico) rodam num interpretador novo, pelo comando interno `update-finish`. Se o filho falhar, os passos rodam no processo atual como antes, e o passo `finish_in_new_code` do relatorio diz qual dos dois aconteceu. A correcao vale a partir do update seguinte a esta versao: o update que instala esta correcao ainda roda o codigo anterior.
+
+- **O wizard terminava sem daemon, sem clientes e com o formato MCP errado.** Medido em 06/10/2026 num HOME limpo: depois de um wizard completo existia so o `config.json`. O `post-install` entrega a instalacao nova ao wizard e para; o servico do daemon e a configuracao dos clientes so rodam quando ja ha config, e o wizard so registrava a unit do llama.cpp. A tela final mandava colar blocos `"args": ["run"]`, que fazem cada cliente subir o proprio daemon (briga pela porta, pelo indice e pela GPU). Novo passo 8: gera o token do servidor, registra o daemon e espera ele responder (reinicia um daemon ja no ar se o usuario confirmar), e liga os clientes encontrados (Claude Code com os hooks de sessao, Claude Desktop, Codex, Antigravity) no formato de cada um, com a falha de um nao impedindo os outros. A tela final resume o que foi feito e nao imprime mais o bloco stdio. Sem o token gerado aqui, os clientes saiam com `Bearer ` vazio e o daemon recusava tudo com 401. `tests/test_wizard_fluxo.py`, com mutacao.
+- **Pastas padrao do wizard nao batiam com o `AGENT_GUIDE`.** O wizard criava `research` e nao criava `Procedures`, `Projects`, `Scratch` nem `Infrastructure`; as ferramentas mandam gravar nessas. Agora cria as nove pastas do guia, e `existing_dirs` ignora pastas que comecam com `.` ou `_`.
+- **Indice dentro de pasta sincronizada.** Com o vault no OneDrive, Dropbox ou iCloud, o ChromaDB ia junto e corrompia. O wizard passa a mandar o indice para uma pasta local e avisa.
+- **Teste de internet por `8.8.8.8:53`.** Falhava atras de proxy e em rede que bloqueia DNS publico, e abortava a instalacao. Agora testa Hugging Face e GitHub por HTTPS, respeitando `HTTPS_PROXY`, e deixa continuar se o usuario confirmar.
+- **Mac Apple Silicon sem MLX no wizard.** O wizard oferece o `mlx_lm.server` (instala o `mlx-lm` no venv se faltar), grava `motor_local: mlx` e nao registra a unit do llama.cpp para ele. O BGE continua onde estava.
+- **Tamanho do modelo de busca errado e sem escolha.** O texto dizia ~110 MB; o `bge-base-en-v1.5` baixa ~440 MB (medido na API do Hugging Face). Agora o passo mostra `bge-base` (~440 MB) e `bge-m3` (~2,3 GB), recomenda o `bge-m3` para vault em portugues, aceita Enter na recomendacao e grava o modelo antes do download.
+- **Outros no wizard:** caminho de binario inexistente era aceito sem conferir; Ctrl+D/EOF dava traceback e agora cancela com mensagem; o passo do indice nao abre mais o ChromaDB com o daemon rodando (manda usar `delegation-core reindex`); no modo Agent a etapa de inicializacao perguntava e descartava a resposta; titulos dos passos ("of 7") atualizados.
+
+### Added
+- **BGE pelo llama.cpp (Mac Apple Silicon: MLX para o modelo, llama.cpp para o BGE). EXPERIMENTAL e opt-in: so foi validado em CPU no Linux, nunca com Metal; nada muda sem `delegation-core embed-llama setup`.** Novo backend de embeddings: `llama-server --embeddings --pooling cls` serve o GGUF do bge-base ou do bge-m3 numa porta propria (`embed_port`, 8182), ao lado do `mlx_lm.server`, sem torch/MPS (o caminho que derrubou o daemon por buffer na memoria unificada). Campos novos `embed_backend` (`auto`, `torch`, `llamacpp`), `embed_llama_binary`, `embed_gguf`, `embed_port`. Medido em 06/10/2026 contra o sentence-transformers com o bge-m3 em seis textos: GGUF f16 cosseno 0,99996 a 0,99999 (q8_0: 0,99862 a 0,99949), entao o padrao e o f16 e a colecao e a mesma dos dois backends: indice existente continua valido, sem reindexar, nos dois sentidos (testado com o ChromaDB real: a funcao se declara `sentence_transformer`, que e o que o ChromaDB grava e valida). `auto` so escolhe o llama.cpp quando binario e GGUF existem, para uma atualizacao nunca deixar um indice sem embedder. Novo `delegation-core embed-llama [setup|status]` (acha ou baixa o llama-server, baixa o GGUF, sobe o servidor, confere a dimensao e so entao grava `embed_backend: llamacpp`); o wizard faz o mesmo no Apple Silicon; o `doctor` avisa Mac ainda no torch e erra quando o llama.cpp foi pedido e nao esta pronto. O servidor sobe sozinho, e um segundo processo reaproveita o que ja esta no ar. `tests/test_embed_llama.py`, com llama-server falso, ChromaDB real e um teste opcional contra o llama-server e o GGUF reais (`DC_TEST_BGE_GGUF`).
+- **`delegation-core eval-search ARQUIVO`**: mede a busca com perguntas de resposta conhecida, por escopo (acertos em k e MRR), sempre pelo daemon. As perguntas ficam fora do repositorio. E a base para uma avaliacao de recuperacao rodando no CI.
+
+---
+
+## v0.15.0 (2026-10-03) - CI nas tres plataformas, Windows correto, modelos por dispositivo e hooks no pacote
+
+### Fixed
+- **Caminho de nota com barra invertida no Windows** (PR 17). `str(p.relative_to(vault))` usa o separador do sistema: o vault gravava o carimbo como `Notes\a.md` e procurava `Notes/a.md`, reindexando a toa, e `create_note` devolvia caminho com barra invertida. Os 30 pontos que viram id, carimbo ou resposta de ferramenta usam `.as_posix()`. Linha antiga com barra invertida no id e varrida como orfa no reindex, para nao duplicar a busca; o primeiro reindex depois da atualizacao reembute o vault uma vez no Windows.
+- **Trava do rebuild de grafo nunca ficava obsoleta no Windows** (PR 17). A vivacidade do PID vem do `psutil` nas tres plataformas; `os.kill(pid, 0)` no Windows encerra o processo em vez de consultar.
+- **BGE na CPU derrubava o modelo local** (PR 19). O vault pedia a placa (`gpu.take("embeddings")`) a cada abertura ou reabertura do indice, mesmo com `embed_device: cpu`, e o pedido parava o llama-server. A reabertura acontece sempre que outro processo escreve no indice. Agora so pede a placa quem vai carregar o BGE na CUDA.
+
+### Added
+- **CI** (PR 17): a suite e a analise estatica rodam em todo push e PR para o `master`, em Linux, Windows e macOS.
+- **`llama_device`** (`auto`, `gpu`, `cpu`), ao lado do `embed_device` (PR 19). `cpu` usa zero camadas na GPU e esconde a placa so do processo do modelo; `gpu` e `auto` nunca herdam um `CUDA_VISIBLE_DEVICES` vazio do daemon. O `heartbeat` mostra `dispositivos`, o `doctor` ganha o check `devices`, e a rota de config do dashboard aceita os dois campos.
+- **`delegation-core-hook`**: os hooks de sessao rodam de dentro do pacote, um processo por evento (`session-start`, `session-end`). O fim de sessao le a entrada uma vez e faz o export e a parada do modelo em sequencia; um passo que falha nao impede o outro. O instalador registra os comandos no `~/.claude/settings.json` (troca os registros antigos, preserva os de terceiros, faz backup) e o uninstall os tira.
+
+### Changed
+- **Hooks nao sao mais copiados** para `~/.delegation_core/hooks/`; as copias antigas sao apagadas depois que o registro novo e gravado. O `doctor` troca `hook_drift` por `hooks`, que confere o registro.
+- **Repositorio sem nomes da equipe** (PR 18): implantacoes viram "field deployment A, B, C, D" em comentarios, docstrings, testes e no DEPLOYMENT_LOG. Incorpora o conteudo do PR 5.
+
+## v0.14.0 (2026-10-03) - Compress local de volta, Windows legivel, imagens no vault e um nucleo sem ciclos
+
+### Fixed
+- **`compress` pelo modelo local falhava em toda chamada desde 03/09** (PR 13). O prompt ainda referenciava `{_lang}`, variavel apagada quando a lingua foi para o system via `with_lang`; a chamada devolvia `Compression failed: name '_lang' is not defined`. Teste reproduz a falha e outro garante a lingua no system.
+- **Windows com DLL bloqueada pelo Smart App Control** (PR 14). A causa real sobe encadeada em vez do "sentence_transformers is not installed" do chromadb; o `heartbeat` sai `degraded` com `embeddings.status = unavailable` e o erro, em vez de `healthy` com a busca fora; sem elevacao (atalho na pasta Inicializar), `stop` encerra o daemon e `start` executa o `.cmd` do venv.
+- **Titulo das transcricoes brutas** vem da primeira fala real, e nao da marcacao `<local-command-caveat>` do Claude Code (40 de 75 tinham esse titulo).
+- **`_bg_maintenance_wrapper` deixou de ser ferramenta MCP.** Era a funcao interna da manutencao em segundo plano; aparecia na lista servida e podia ser chamada fora do job. O servidor publica 55 ferramentas.
+- **O servico gerado apontava `Documentation=` para um repositorio inexistente**; aponta para o repositorio do projeto.
+- **Inicializacao no Windows** (PR 3, 29/09): o atalho da pasta Inicializar foi recriado para chamar o Python do venv em vez do executavel bloqueado; os testes de definicao de servico escolhem o comportamento da plataforma; as metricas de inicio distinguem arquivos Markdown, documentos indexados e trechos do ChromaDB; a permissao do `config.json` e gravada por caminho compativel com o Windows.
+- **`engine` encadeia a causa** no `RuntimeError` depois das tentativas (`raise ... from e`).
+
+### Added
+- **Ingestao declarativa** (PR 2, 29/09): `ingest_sources` e padroes de exclusao configuram as fontes externas recorrentes, com ajustes por fonte e exclusoes seguras antes de ingerir; guia em `docs/INGEST_CONFIGURATION.md`.
+- **Imagem vira nota buscavel** (PR 15): data por EXIF, pelo nome da captura ou mtime; dimensoes, camera e GPS; OCR com tesseract. O extrator aceita png, jpg, webp, gif, bmp e tiff. `delegation-core ocr-setup` baixa `por` e `eng` para `~/.delegation_core/tessdata`. Icone pequeno nao passa pelo OCR e imagem sem texto nao e indexada pelo `ingest_folder`.
+- **Analise estatica na suite** (`test_analise_estatica.py`): ruff com pyflakes e erro de sintaxe no nucleo e nos hooks. `ruff` entra no extra `[dev]`.
+- **Testes de estrutura:** nenhum ciclo de import no nucleo, nenhuma funcao interna publicada como ferramenta, so o `engine` chama `/v1/chat/completions`, e a deriva de contagem de ferramentas agora tambem e conferida em `docs/`.
+
+### Changed
+- **Nenhum ciclo de import no nucleo.** Eram cinco, contando import dentro de funcao. `frontmatter_aliases` foi para o `notes` (o `linker` reexporta); `em_pasta_sincronizada` e `caminho_local_do_indice` foram para o `config` (o `recuperacao` reexporta); `ingest` importa `client_from_path` do `notes`; `doctor` acha o `cli.py` sem importa-lo; `ingested_link_stems` recebe o registro, lido pelo `vault`.
+- **`vault.py` encolheu** para caber na guarda de tamanho: `_frontmatter_parses` foi para o `notes`.
+- **Porta padrao do MCP e 8797** (PR 12), por conflito com a porta que o proxy do Headroom costuma usar. Um `server_port` explicito em config existente e preservado, e os exemplos de config de cliente usam o padrao novo.
+- **Documentacao:** `docs/MAPA.md` reescrito sem numeros, `docs/INSTALL_MAC_MLX.md` entra no repositorio, e o `HANDOFF.md` volta a descrever a arquitetura do daemon HTTP.
+
+### Incluido de 2026-09-29 (PRs 7 a 11): daemon travado no Mac, reabertura do indice, loop bloqueado e watchdog
+
+#### Fixed
+- **Reabertura do indice vazava o motor do chromadb.** `clear_system_cache()` so esquecia o System antigo, sem parar; medido no chromadb 1.5.9, cada reabertura deixava 27 threads rodando (234 de 285 no daemon do Mac em 26/09). A reabertura agora chama `Client.close()` (`index_lock.close_chroma_client`).
+- **Reabertura sob consulta em andamento.** Toda chamada que usa `collection` segura uma trava compartilhada; a reabertura espera com a trava exclusiva. Pedida de dentro de uma consulta, ela e adiada para a chamada seguinte, em vez de travar em si mesma.
+- **Ferramentas bloqueantes no event loop.** 17 ferramentas sem `await` viraram `def`, que o fastmcp roda no threadpool; `search_vault` e `heartbeat` levam o trabalho do indice para `asyncio.to_thread`. As que escrevem continuam serializadas entre si.
+- **`status` e `embed-model` abriam o indice ao lado do daemon.** Abrir um PersistentClient, mesmo so para contar, muda o mtime do `chroma.sqlite3`, e o daemon le isso como escrita de outro processo e reabre. Com o daemon no ar eles perguntam a ele; um daemon que aceita conexao e nao responde e reportado em vez de contornado.
+
+#### Added
+- **Watchdog do event loop** (`loop_watchdog_sec`, padrao 300, 0 desliga). Um timer do faulthandler, que roda sem o GIL, e rearmado pelo loop; se o loop parar, grava a pilha de todas as threads em `~/.delegation_core/watchdog_tracebacks.log` e sai com codigo 1, que launchd e systemd reiniciam.
+
+#### Not in this change
+- O indice ja danificado no Mac (SIGSEGV em `chromadb_rust_bindings` desde 29/09 07:43) precisa de recuperacao propria; esta mudanca previne, nao repara.
+- Troca do modelo padrao para bge-m3 e a lista de pastas do AGENT_GUIDE no Mac: ajustes de configuracao por maquina.
+
+---
+
+## v0.13.0 / v13 (2026-09-04) - Delegation-Core Office: Consolidacao de 49 Defeitos de Campo, Ponte Claude Desktop, Instaladores Python e Blindagem de AST
+
+### Added & Rebranded
+- **Project Rebranding to Delegation-Core Office**: Official renaming of the repository and project identity to Delegation-Core Office.
+- **Native Claude Desktop stdio bridge (`src/delegation_core/stdio_bridge.py`)**:
+  - Implemented an in-process FastMCP stdio proxy (`mcp-stdio`) that forwards JSON-RPC communication directly to the local HTTP daemon.
+  - Solves the fundamental Claude Desktop limitation where remote `type: http` entries with `url` caused Claude Desktop to overwrite `claude_desktop_config.json` and delete the entire `mcpServers` block.
+  - Eliminates external dependencies on Node.js and `mcp-remote`, avoiding multi-daemon port and VRAM collisions.
+- **Unified Python-based installation and update engine (`src/delegation_core/installer.py`)**:
+  - Migrated 810 lines of disparate shell (`install.sh`, `uninstall.sh`) and batch (`install.bat`, `uninstall.bat`) scripts into modular, fully testable Python.
+  - Shell and Batch files shrunk to thin runtime-detection stubs.
+  - New CLI subcommand `delegation-core update`: performs automated package upgrades, service restarts, client config repairs, and vault health checks in a single atomic command.
+  - Added robust service control commands (`stop`, `start`, `restart`, `is_up`) across systemd (Linux), launchd (macOS), and Task Scheduler (Windows).
+- **GPU Arbiter for VRAM Mutual Exclusion (`src/delegation_core/gpu.py`)**:
+  - Implemented `GpuArbiter` with `threading.RLock()` to manage single-GPU contention between the 12B local LLM (`llama-server`) and `BAAI/bge-m3` embedding model.
+  - Coordinated three-tier memory eviction (SentenceTransformer class cache, ChromaDB collection pointers, and PyTorch CUDA cache reclamation) to eliminate `cudaMalloc` out-of-memory errors on 16 GB GPUs.
+- **Stamped Incremental Indexing (`stamp_indexed()` in `src/delegation_core/vault.py`)**:
+  - Stamped timestamps on successfully indexed notes to eliminate redundant vector re-embeddings.
+  - Reduced incremental reindex duration on 4,800+ note vaults from 11 minutes to under 2 seconds.
+- **Modular Note Management (`src/delegation_core/notes.py`)**:
+  - Extracted note authoring, frontmatter sanitization, and title alias management out of `vault.py` into a dedicated domain module.
+- **Systemic Test Guarding (`tests/conftest.py`)**:
+  - Added global isolation fixtures to guarantee that automated test runs never mutate or overwrite the user's real Obsidian vault or configuration.
+  - Test suite expanded to 1,747 automated tests (100% green).
+
+### Fixed & Hardened (49 Defeitos de Campo Corrigidos)
+
+#### Grupo 1: CLI, Daemon e Concorrencia de GPU
+- **1. `note write` e `note update` escreviam no indice por fora do daemon (`cli.py`)**:
+  - *Defeito:* A CLI criava um VaultManager local para indexar a nota em vez de delegar ao daemon ativo, instanciando uma segunda copia de 2.3 GB do BGE-m3 na GPU.
+  - *Correcao:* Chamadas de escrita e atualizacao foram roteadas para a API do daemon HTTP via loopback.
+- **2. `wikilinks()` sugeria links para notas ja apagadas (`linker.py`)**:
+  - *Defeito:* O resolvedor consultava apenas o indice em memoria sem checar se o arquivo correspondente ainda existia no disco.
+  - *Correcao:* Adicionada validacao de existencia fisica antes de injetar wikilinks de retorno.
+- **3. `typical_seconds` calculava mediana sobre distribuicao bimodal (`jobs.py`)**:
+  - *Defeito:* O calculo de tempo tipico misturava jobs curtos (reindex incremental de 70ms) com jobs longos (reindex forcado de 3 minutos), gerando estimativas erradas de pacing.
+  - *Correcao:* As metricas foram segregadas por tipo de carga e parametros de execucao.
+- **4. `note write` destruia nota anterior do mesmo dia (`notes.py`)**:
+  - *Defeito:* Criar uma segunda nota no mesmo dia com titulo semelhante sobrescrevia o arquivo anterior em vez de gerar um sufixo desambiguador.
+  - *Correcao:* Implementada geracao de sufixo numerico atomico na colisao de nomes.
+- **21. `relink` e `graph build` escreviam no indice por fora do daemon (`cli.py`)**:
+  - *Defeito:* Comandos de manutencao pesada criavam instancias paralelas do BGE na VRAM.
+  - *Correcao:* Delegado todo o processo de reindexacao e escrita para a fila do daemon.
+- **22. Leituras da CLI (`search`) carregavam segundo modelo BGE na GPU (`cli.py`)**:
+  - *Defeito:* Buscas pontuais disparavam o carregamento de embeddings localmente enquanto o daemon ja mantinha o modelo residente na memoria de video.
+  - *Correcao:* Roteamento da busca CLI para o endpoint `/mcp` do daemon.
+- **23. Falso positivo no diagnostico `doctor.py` (`doctor.py`)**:
+  - *Defeito:* O check `local_fallback` reportava "the daemon is the only writer" sem inspecionar os processos reais no sistema operacional.
+  - *Correcao:* Verificacao ativa de descritores de arquivo e locks abertos antes de atestar exclusividade.
+- **25. `stdio_bridge` nao validava preenchimento de credenciais (`stdio_bridge.py`)**:
+  - *Defeito:* A ponte verificava se o daemon estava escutando na porta, mas nao validava se o token Bearer estava configurado, enviando `Authorization: Bearer ` vazio e gerando erro 401 silencioso.
+  - *Correcao:* Validacao previa da existencia e formato do token na subida da ponte.
+- **28. Endpoints do Dashboard desprotegidos (`dashboard_api.py`)**:
+  - *Defeito:* A porta 8788 servia acoes de escrita e leitura de tarefas sem verificacao de token ou isolamento rigoroso.
+  - *Correcao:* Blindagem dos endpoints e amarracao estrita ao loopback.
+
+#### Grupo 2: Setup, Instaladores e Servicos Multiplataforma
+- **5. Caractere `%` no caminho quebrava o systemd (`wizard.py`)**:
+  - *Defeito:* O systemd interpreta `%h` e `%n` como especificadores de formatacao. Um diretorio com `%` (ex: `100%hits`) impedia a inicializacao do servico no boot.
+  - *Correcao:* Escapamento de `%` para `%%` na geracao da unit do systemd.
+- **6. Caractere `&` no caminho quebrava o launchd no macOS (`wizard.py`)**:
+  - *Defeito:* Arquivos `.plist` em XML geravam erro de sintaxe ("invalid token") com `&` nao escapado.
+  - *Correcao:* Escapamento para `&amp;` em todas as tags de caminhos do plist.
+- **7. Falso negativo em `_conflicts_with_config_dir` (`wizard.py`)**:
+  - *Defeito:* Em caso de `OSError` de permissao, a funcao retornava `False` (sem conflito), permitindo sobreposicoes destrutivas de diretorios.
+  - *Correcao:* Tratamento estrito de excecoes de I/O com bloqueio defensivo.
+- **8. `vault_is_inside_config_dir` retornava `False` no escuro (`installer.py`)**:
+  - *Defeito:* Falhas na resolucao de caminhos faziam o desinstalador achar que o vault nao estava na pasta de configuracao, abrindo risco de apagar notas de usuarios no uninstall.
+  - *Correcao:* Resolucao segura e estrita com fallback conservador.
+- **9. `is_up(wait_seconds=15)` checava desligamento com logica invertida (`service.py`)**:
+  - *Defeito:* O metodo esperava o servico subir quando o objetivo do chamador era esperar o daemon descer apos um stop.
+  - *Correcao:* Criacao do metodo explicito `wait_down(wait_seconds)`.
+- **10. Contradicao em `venv_pending["detail"]` (`installer.py`)**:
+  - *Defeito:* O relatorio de integridade marcava o ambiente como pronto enquanto a mensagem de detalhe afirmava pendencia de compilacao.
+  - *Correcao:* Sincronizacao dos estados booleanos e textuais.
+- **14. Falha de codificacao na escrita da unit no wizard (`wizard.py`)**:
+  - *Defeito:* `wizard.py` gravava a unit sem `encoding="utf-8"`, levantando `UnicodeEncodeError` sob locales restritos (`LC_ALL=C`).
+  - *Correcao:* Inclusao explicita de `encoding="utf-8"` na escrita de arquivos de servico.
+
+#### Grupo 3: Integridade do Vault, YAML e Atomicidade de I/O
+- **11. `_merge_alias` inseria aliases crus no frontmatter (`notes.py`)**:
+  - *Defeito:* Aliases com virgula dividiam um alias em dois; aliases com colchetes ou dois-pontos corrompiam o bloco YAML.
+  - *Correcao:* Sanitizacao de cada alias individualmente atraves de `yaml_quote_scalar`.
+- **12. Notas com frontmatter corrompido reportavam `needs_repair: 0` (`vault.py`)**:
+  - *Defeito:* Falhas no parser YAML eram suprimidas silenciosamente e a nota nao entrava na lista de reparo.
+  - *Correcao:* Identificacao de erros de sintaxe YAML e sinalizacao explicita de necessidade de reparo.
+- **13. Concorrencia no hook de rebuild do grafo (`graph_hook_rebuild.py`)**:
+  - *Defeito:* Multiplos commits simultaneos disparavam rebuilds concorrentes que colidiam no mesmo lock.
+  - *Correcao:* Implementacao de lock nao bloqueante com descarte de execucoes redundantes.
+- **16. `config.json` gravado sem atomicidade (`config.py`)**:
+  - *Defeito:* A configuracao era sobrescrita diretamente; se o processo caisse no meio, o arquivo ficava truncado/zerado.
+  - *Correcao:* Gravacao atomica via arquivo temporario (`.tmp`) seguido de `fsync` e `os.replace`.
+- **17. `.chroma_index.json` sem gravacao atomica (`vault.py`)**:
+  - *Defeito:* Arquivo com milhares de carimbos mtime corria risco de corrupcao e ignorava falhas com `except Exception: pass`.
+  - *Correcao:* Gravacao atomica com propagacao e tratamento correto de erros de I/O.
+- **18. `_clear_previous_filing` nao validava contencao no vault (`graphbridge.py`)**:
+  - *Defeito:* A funcao de remocao de notas antigas usava apenas `is_file()`, permitindo caminhos relativos malformados fora da raiz do vault.
+  - *Correcao:* Validacao estrita com `resolve_in_vault()` antes de qualquer `unlink`.
+- **19. Diretorio `sessions` em minusculo no hook (`session_export.py`)**:
+  - *Defeito:* O hook procurava `sessions` em vez da pasta canonica `Sessions`, jogando resumos semanais na raiz do vault.
+  - *Correcao:* Normalizacao do caminho para a pasta correta.
+- **20. Arquivos na raiz invisiveis as metricas de saude (`vault.py`)**:
+  - *Defeito:* Notas geradas na raiz do vault nao eram computadas no total de notas pelo `vault_health`.
+  - *Correcao:* Inclusao de notas na raiz do vault na contagem e validacao de saude.
+- **24. `session_start_brief` atribuia notas de ferramentas a humanos (`session.py`)**:
+  - *Defeito:* Um passe de `relink` alterava o mtime de centenas de notas, e o brief inicial as listava como "trabalho feito por outros clientes em sessoes recentes".
+  - *Correcao:* Filtragem de notas modificadas por processos automaticos do sistema.
+- **29. Dessincronizacao entre cache de saude e calculo em tempo real (`vault.py`)**:
+  - *Defeito:* `vault_health.json` retornava metricas desatualizadas em relacao ao `vault_health_detail()`.
+  - *Correcao:* Invalidacao atomica e recalculo do cache sob demanda.
+- **30. Vault desmontado respondia como vazio saudavel (`vault.py`)**:
+  - *Defeito:* Se a pasta do vault estivesse inacessivel ou desmontada, o status reportava 0 notas e 0 erros sem alertar falha.
+  - *Correcao:* Verificacao explicita de existencia e acessibilidade do diretorio raiz.
+- **32. `yaml_quote_scalar` quebrava com caracteres de controle (`notes.py`)**:
+  - *Defeito:* Bytes de controle invisiveis (0 a 31, como ``) nao eram escapados e quebravam o `yaml.safe_load`.
+  - *Correcao:* Escapamento completo de caracteres de controle Unicode e ASCII.
+- **33. `resolve_in_vault` levantava erro 500 com byte nulo (`notes.py`)**:
+  - *Defeito:* Passar `%00` na URL causava `ValueError: embedded null byte` no sistema de arquivos em vez de retornar `None`.
+  - *Correcao:* Sanitizacao de strings contra bytes nulos antes de chamar o `Path`.
+- **37. `repair._ja_tratada` sobrescrevia notas ilegiveis (`organizer.py`)**:
+  - *Defeito:* Quando a funcao nao conseguia ler a nota por erro de I/O, retornava `False` e o reparo tentava sobrescrever o arquivo cego.
+  - *Correcao:* Retorno seguro de `True` (nao mexer) quando a leitura falhar.
+
+#### Grupo 4: Ingestao, Extracao e Processos
+- **15. Extracao de `.groovy` corrompia caracteres acentuados (`extract.py`)**:
+  - *Defeito:* Arquivos eram lidos com `errors="replace"` sem encoding explicito, convertendo cedilhas e acentos em caracteres de substituicao `�`.
+  - *Correcao:* Abertura com deteccao e fallback explicito de UTF-8.
+- **26. Piso de substancia ausente para arquivos nao binarios (`extractor.py`)**:
+  - *Defeito:* O limite minimo de texto cobria PDFs e DOCX, mas ignorava `.html`, `.json` e `.txt`. Um HTML sem texto gerava uma nota vazia com alucinacoes de pessoas/decisoes inventadas pelo modelo.
+  - *Correcao:* Aplicacao do piso de substancia para todos os tipos MIME suportados.
+- **27. Afirmacoes manuais desatualizadas em `capabilities()` (`capabilities.py`)**:
+  - *Defeito:* O dicionario `known_unwired` continha ferramentas que ja haviam sido integradas ou removidas.
+  - *Correcao:* Sincronizacao do registro de capacidades com a inspecao estatica do AST.
+- **31. `ProcessTracker` quebrava com tipo raiz incorreto (`tracker.py`)**:
+  - *Defeito:* Receber um JSON valido com formato `{}` em vez de `[]` levantava `AttributeError` no append.
+  - *Correcao:* Validacao de `isinstance(data, list)` com recuperacao graciosa.
+- **34. Divergencia sobre o escopo padrao de busca (`server.py`)**:
+  - *Defeito:* Docstrings e relatorios afirmavam escopos fixos conflitantes enquanto a implementacao e adaptativa.
+  - *Correcao:* Unificacao da documentacao e retorno explicito do escopo resolvido na resposta da busca.
+- **35. Arquivos ignorados tratados incorretamente no inbox (`organizer.py`)**:
+  - *Defeito:* Arquivos `LICENSE` iam para `skipped` e permaneciam no inbox, disparando loops de manutencao a cada nova sessao.
+  - *Correcao:* Mapeamento correto de arquivos boilerplate para descarte seguro em `junk`.
+- **36. `ingest._load_registry` sem validacao de tipo raiz (`ingest.py`)**:
+  - *Defeito:* Se o arquivo de fontes indexadas contivesse uma lista em vez de dicionario, o carregador quebrava com `TypeError`.
+  - *Correcao:* Validacao com `isinstance(data, dict)` antes de indexar caminhos.
+- **40. `count_words` cacheava falhas transitorias como 0 palavras (`extractor.py`)**:
+  - *Defeito:* Uma excecao transitoria de I/O gravava `0` palavras no cache `(size, mtime_ns)`, impedindo reindexacoes futuras do arquivo.
+  - *Correcao:* Erros de leitura nao sao gravados no cache persistente.
+
+#### Grupo 5: Grafos de Codigo e Resolucao de Imports (`graph/`)
+- **38. Nao determinismo no desempate de nos (`_pick_winner`) (`dedup.py`)**:
+  - *Defeito:* Quando IDs tinham o mesmo sufixo e comprimento, o desempate caia na posicao da lista no chunk, gerando grafos diferentes a cada execucao.
+  - *Correcao:* Desempate deterministico pelo identificador completo do no.
+- **39. Rotulos repetidos no fallback de nomes curtos (`build.py`)**:
+  - *Defeito:* `_shortest_unique_suffix` devolvia basenames duplicados para arquivos de mesmo nome em pastas distintas.
+  - *Correcao:* Extensao progressiva de diretorios pais ate a garantia de unicidade visual.
+- **41. Agregacao de dependencias ausentes por texto fragil (`extract.py`)**:
+  - *Defeito:* Casamento de string crua ("not installed" in erro) falhava em mensagens dinamicas de erro de import de parsers.
+  - *Correcao:* Captura tipada de `ImportError` e `ModuleNotFoundError`.
+- **42. `_strip_jsonc` corrompia strings contendo virgulas (`resolution.py`)**:
+  - *Defeito:* A remocao de virgulas finais (trailing commas) via regex cru sobre o arquivo alterava valores literais em strings JSON.
+  - *Correcao:* Parser ciente de strings literais antes da aplicacao do filtro de comentarios e virgulas.
+- **43. Resolucao de curingas retornava asterisco cru (`resolution.py`)**:
+  - *Defeito:* Em aliases como `@lib/*.css`, se a captura do curinga fosse vazia (`@lib/.css`), a string voltava com o asterisco intacto (`estilos/*.css`).
+  - *Correcao:* Tratamento explicito de capturas de tamanho zero.
+- **44. `_resolve_js_import_path` confundia diretorios com arquivos (`resolution.py`)**:
+  - *Defeito:* Ao importar `./comp`, se `src/comp/` existisse como pasta, o resolvedor entregava a pasta como se fosse o modulo final em vez de procurar `src/comp/index.ts`.
+  - *Correcao:* Verificacao explicita de `is_dir()` e busca em cascata de arquivos index.
+- **45. Listas inline no `pnpm-workspace.yaml` eram ignoradas (`resolution.py`)**:
+  - *Defeito:* O parser manual de YAML aceitava apenas listas em bloco com hifens; a sintaxe inline `packages: ['apps/*', 'libs/*']` retornava lista vazia.
+  - *Correcao:* Suporte a listas inline entre colchetes e aspas.
+- **46. Tipos invalidos em `tsconfig.json` descartavam arquivos inteiros (`resolution.py`)**:
+  - *Defeito:* 9 variacoes de valores nulos ou tipos errados em `compilerOptions`, `paths` e `baseUrl` causavam `AttributeError`/`TypeError` e abortavam a extracao do arquivo todo.
+  - *Correcao:* Validacao defensiva tipo a tipo com degradacao graciosa por alias individual.
+- **47. Inclusoes `#include` em C permitiam fuga do repositorio (`resolution.py`)**:
+  - *Defeito:* `#include "/etc/passwd"` descartava o diretorio base e resolvia o arquivo absoluto no sistema operacional.
+  - *Correcao:* Bloqueio de caminhos absolutos e contencao no diretorio do projeto.
+- **48. `require()` em Lua com ponto inicial sondava a raiz do disco (`resolution.py`)**:
+  - *Defeito:* A substituicao de `.` por `/` transformava `require(".tmp.segredo")` em `/tmp/segredo.lua`, descartando o diretorio base.
+  - *Correcao:* Tratamento de pontos iniciais e sanitizacao antes da conversao de separadores.
+- **49. Travessia ascendente em imports relativos com escopo de raiz (`extract.py` e `resolution.py`)**:
+  - *Defeito:* Imports relativos como `import "../../fora"` resolviam para nos fora do repositorio varrido porque os analisadores de AST usam assinaturas fixas sem receber a raiz do scan.
+  - *Correcao:* Criacao do context manager `escopo_de_root(root)` e aplicacao de `_dentro_do_root` em `extract.py` e nos resolvedores de JS/TS/C/Lua, contendo alvos relativos na raiz do projeto.
+
+---
+
+## v0.13.0-rc1 (2026-08-23) - Client Scoping and Code Graph Consolidation
+
+### Added
+- **Client Metadata Scoping (`search_vault(client=...)`)**:
+  - Promoted `client:` frontmatter field to indexed ChromaDB metadata.
+  - Added client-filtered search composed via `$and` logic with scope filters, supporting path-based client derivation for ingested files.
+- **Code Graph Ingestion Engine (Graphify Integration)**:
+  - Vendored and adapted Graphify AST pipeline supporting Python, JavaScript, TypeScript, Rust, Go, and C/C++.
+  - Added sourcemaps extraction (`extract_source_maps`), code blast-radius analysis (`graph_affected`), and automated git commit hooks (`graph_hook_install`).
+
+---
+
+## v0.12.3 (2026-08-23) - Service Stop Timeouts and ChromaDB Hardening
+
+### Fixed
+- **Service Manager Daemon Stop Timeout**:
+  - Set `TimeoutStopSec=600` on generated systemd user units and `ExitTimeOut` on launchd plists.
+  - Prevented OS service managers from sending SIGKILL mid-write to ChromaDB and SQLite during lengthy reindexes or relinking passes, resolving HNSW segment corruption.
+
+---
+
+## v0.12.2 (2026-08-23) - Note Linking Resolvers and Background Relinking
+
+### Added
+- **`relink_folder_bg` Background Relinking**:
+  - Asynchronous background execution for heavy folder cross-linking, preventing client timeout drops on large folders.
+
+### Fixed
+- **Date-Stripped Wikilink Resolution**:
+  - Allowed `[[Title]]` to resolve against `{date}-{title}.md` without forcing users or agents to type date prefixes in links.
+- **Safe Filename Truncation Aliasing**:
+  - Emitted untruncated title aliases in note frontmatter when filename truncation occurred.
+
+---
+
+## v0.12.1 (2026-08-23) - Field Defect Resolutions and Data Safety
+
+### Fixed
+- **Legacy Collection Adoption**:
+  - Gated adoption of legacy vector collections on measured embedding dimensions, preventing dimensional mismatches between bge-base (768-dim) and bge-m3 (1024-dim).
+- **Incremental mtime Re-Ingestion**:
+  - Fixed incremental reindex to only force re-embeds for files whose index rows are actually missing.
+- **Stale Vector Tail Cleanup**:
+  - Fixed `upsert` so shortened notes remove excess chunks rather than leaving stale text fragments in the vector index.
+- **Dataless File Detection**:
+  - Prevented cloud-evicted or zero-block ext4/btrfs files from indexing corrupt empty content.
+- **Scope Defaulting**:
+  - Handled default search scope dynamically based on vault composition.
+
+---
+
+## v0.12.0 (2026-08-20) - Note Chunking and Execution Limits
+
+### Added
+- **Vault Note Chunking**:
+  - Chunked long vault notes during embedding to match the token context limits of embedding models.
+- **Orphan Sweep Hardening**:
+  - Verified and hardened orphan note classification.
+
+---
+
+## v0.11.0 to v0.11.4 (2026-08-12 to 2026-08-14) - Single HTTP Daemon Architecture & Web Dashboard
+
+### Added
+- **Single HTTP Daemon Architecture (`127.0.0.1:8787/mcp`)**:
+  - Major architectural pivot from multi-process stdio to a single long-lived FastMCP HTTP daemon.
+  - Eliminated VRAM duplication of `bge-m3` across multiple connected MCP clients.
+  - Added Bearer token authentication on loopback.
+- **Integrated Web Dashboard API (`dashboard_api.py`)**:
+  - Served dashboard endpoints (`/api/status`, `/api/vault/tree`, `/api/vault/graph`, `/api/processes`, `/api/llama`) directly from the daemon on port 8788.
+- **Multi-Agent Local Queue (`local_task_submit`, `local_task_status`)**:
+  - Shared asynchronous task queue allowing multiple AI agents to submit background jobs to the local LLM.
+
+---
+
+## v0.10.0 (2026-08-03) - Note Renaming, Graph Hubs, and Literal Search
+
+### Added
+- **Atomic Note Renaming (`vault_rename_note` / `POST /api/vault/note/rename`)**:
+  - Staged, atomic renaming of notes with automated repointing of all inbound `[[wikilinks]]`.
+- **Community Hub Labeling (`graph/cluster.py`)**:
+  - Named graph communities using dominant locally-defined code symbols rather than generic identifiers.
+- **Paced Task Status Reporting (`task_status`)**:
+  - Added execution metrics and typical run durations based on persisted job history (`job_durations.json`).
+- **Literal Note Search (`vault_find_notes`)**:
+  - Exact stem, prefix, and substring title matching bypassing embedding cutoffs.
+- **Backlinks Panel (`vault_note_links`)**:
+  - Detailed inbound and outbound link graph reporting with broken link flags.
+
+---
+
+## v0.7.0 to v0.9.0 (2026-07-20 to 2026-07-28) - Engine Modes, Llama Controls, and Task Tracker
+
+### Added
+- **Tri-Mode Engine Architecture (`engine_mode`)**:
+  - `local`: synthesis and summarization run offline on local llama.cpp.
+  - `agent`: zero local LLM overhead; synthesis delegated to calling agent.
+  - `hybrid`: interactive work handled by agent; maintenance and bulk synthesis handled locally.
+- **Dashboard Task Tracker Panel**:
+  - Added process tracking UI in dashboard and start/stop button for llama-server.
+- **Opt-in Web Search**:
+  - Privacy-preserving DuckDuckGo search integration via `ddgs`.
+- **Graph Exporters (`graph_export`)**:
+  - Export code knowledge graphs to GraphML (Gephi/Cytoscape), SVG, and Cypher (Neo4j).
+
+---
+
+## v0.5.0 to v0.6.4 (2026-06-29 to 2026-07-10) - Ingestion, Semantic Relinking, and Multiplatform Downloader
+
+### Added
+- **Recursive Folder Ingest (`ingest_folder` / `ingest_folder_bg`)**:
+  - Extraction and vector indexing of PDF, DOCX, XLSX, PPTX, HTML, and MDX files.
+- **Semantic Note Relinking (`relink_folder`)**:
+  - Automated cross-linking of unlinked notes based on embedding similarity thresholds.
+- **Multiplatform Llama.cpp Downloader (`src/delegation_core/downloader.py`)**:
+  - Automated release asset discovery and extraction for Linux (`.tar.gz`), macOS (`.tar.gz`), and Windows (`.zip`), preserving dynamic library symlinks.
+- **Bundled Agent Skills (`skills/`)**:
+  - Integrated 17 universal Claude Code agent skills deployed into `~/.claude/skills/`.
+
+### Fixed
+- **YAML Frontmatter Colon Quoting**:
+  - Sanitized and quoted frontmatter scalars containing colons and special characters.
+- **Reasoning Tag Stripping**:
+  - Added `_strip_think_tags()` to purge chain-of-thought `<think>` blocks from frontmatter.
+
+---
+
+## v0.1.0 to v0.4.0 (2026-06-10 to 2026-06-27) - Inception: Local Memory Bridge & Vault Vector Store
+
+### Added
+- **Initial MCP Stdio Memory Server**:
+  - Inception of `delegation-core` as an offline memory bridge connecting AI agents to Obsidian vaults.
+  - Semantic vector search using `BAAI/bge-m3` embeddings stored in ChromaDB.
+- **Core MCP Tools**:
+  - `search_vault`: semantic vector query against notes.
+  - `read_note` / `write_note`: curated markdown reading and atomic creation with frontmatter.
+  - `compress`: automatic summarization of lengthy session notes.
+  - `vault_health_detail` & `vault_stats`: orphan detection, unindexed tracking, and broken wikilink accounting.
+  - `run_maintenance`: automated healing of broken links and metadata.

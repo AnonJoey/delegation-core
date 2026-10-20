@@ -1,0 +1,224 @@
+# Instalação no Mac com MLX, integrada ao delegation-core
+
+Instruções para o Claude Code rodando no MacBook Pro M5 Max (48 GB). Leia tudo antes
+de começar. Trabalhe etapa por etapa e só avance quando a verificação da etapa passar.
+Se uma verificação falhar, pare e relate o que viu: não improvise correção no código
+do delegation-core nesta máquina (ver "Regras" no fim).
+
+## Objetivo
+
+1. Rodar permanentemente, em modo headless, o Qwen3.8 27B em MLX 8-bit, servido pelo
+   `mlx_lm.server` numa API compatível com OpenAI.
+2. Instalar o delegation-core e fazer ele usar esse servidor como motor local, no lugar
+   do llama.cpp. O MLX vira o serviço permanente; o delegation-core só conversa com ele.
+3. Registrar o delegation-core como servidor MCP no Claude Code desta máquina.
+
+## Como a integração funciona (leia antes de mexer)
+
+Conferido no código de produção (`src/delegation_core/engine.py`) e medido contra o
+`mlx_lm.server` 0.32 de verdade em 2026-10-06:
+
+- Com `"motor_local": "mlx"` na config, o delegation-core trata o `mlx_lm.server` como
+  motor proprio. Ele fala com o motor em `http://localhost:{llama_port}`, so por
+  `GET /health` e `POST /v1/chat/completions`.
+- Antes de cada chamada ele testa `/health`. Se responder 200, usa o servidor que ja
+  esta no ar (o LaunchAgent da etapa 5) e nunca sobe outro. Se nao responder, ele
+  mesmo sobe o `mlx_lm.server` com `--model`, `--host`, `--port` e
+  `--chat-template-args`, e espera ate 300 s (um 27B de 8 bits sao ~30 GB lidos do
+  disco).
+- O desligamento por ociosidade (`local_idle_shutdown_sec`) so mata processo que o
+  proprio delegation-core iniciou. O servico do LaunchAgent nunca e tocado.
+- Cada pedido manda `"model": "default_model"`, que o `mlx_lm.server` entende como o
+  modelo carregado por `--model`. **Ate 2026-10-06 o codigo mandava `"local"`, e o
+  `mlx_lm.server` tratava isso como um repositorio a baixar: toda geracao falhava.**
+  Atualize o delegation-core antes de usar o MLX.
+- `"chat_template_kwargs": {"enable_thinking": false}` e aceito pelo `mlx_lm.server`
+  e desliga o raciocinio por pedido.
+- Modelos novos: o `mlx-lm` 0.32 ja traz as arquiteturas `qwen3_5`, `qwen3_next`,
+  `gemma4`, `gpt_oss`, `llama4` e `mistral4`. Use 0.32 ou mais novo.
+
+Porta: use **8181**, que é o `llama_port` padrão do delegation-core. Assim a config não
+precisa de porta diferente e não há dois lugares para manter sincronizados.
+
+## 1. Pré-requisitos
+
+- `uname -m` deve dar `arm64`. Anote a versão do macOS (`sw_vers`).
+- Instale o `uv` se não existir (`brew install uv`) e o CLI do Hugging Face
+  (`uv tool install "huggingface_hub[cli]"`).
+- Confirme `git` e Python 3.12 disponíveis (o `uv` resolve o Python se faltar).
+
+## 2. Ambiente MLX
+
+- Crie o venv em `~/mlx-server` com Python 3.12: `uv venv --python 3.12 ~/mlx-server/.venv`.
+- Instale `mlx-lm` (versão mais recente) nesse venv.
+- Confirme que o `mlx-lm` instalado suporta a arquitetura do modelo (procure o módulo
+  correspondente em `mlx_lm/models/`, ex. `qwen3_5`). Se não suportar, instale do
+  GitHub (`ml-explore/mlx-lm`, branch main).
+- Rode `~/mlx-server/.venv/bin/mlx_lm.server --help` e anote se existem as opções
+  `--chat-template-args` e `--max-tokens`. A etapa 5 depende disso.
+
+## 3. Modelo
+
+- Pesquise no Hugging Face um repositório MLX **8-bit** do `Qwen/Qwen3.8-27B`
+  (priorize `mlx-community`, depois o mais baixado). **Mostre o nome ao usuário antes
+  de baixar** e espere confirmação.
+- Baixe com `hf download <repo>`. Anote o caminho do snapshot no cache
+  (`~/.cache/huggingface/hub/models--.../snapshots/<hash>`), ele vai para a config
+  do delegation-core.
+- Teste rápido com `mlx_lm.generate --model <repo> --prompt "..."` e confirme que a
+  resposta é coerente.
+
+## 4. Limite de memória da GPU, persistente
+
+Orçamento: pesos 8-bit de um 27B ocupam perto de 28 a 30 GB. O BGE-M3 do
+delegation-core roda ao lado, pelo llama.cpp (etapa 8), e ocupa mais uns 2 GB. Por isso o alvo
+de 40 GB para a GPU, deixando cerca de 8 GB para o macOS.
+
+- Crie `/Library/LaunchDaemons/com.local.gpu-wired-limit.plist` que rode
+  `/usr/sbin/sysctl -w iogpu.wired_limit_mb=40960`, com `RunAtLoad=true`, dono
+  `root:wheel`, permissão 644.
+- Carregue com `sudo launchctl bootstrap system <plist>` e confirme com
+  `sysctl iogpu.wired_limit_mb`.
+- Todo comando com `sudo`: se você não conseguir rodar, mostre o comando exato para o
+  usuário executar com `! <comando>` e espere o resultado.
+
+## 5. Servidor MLX como serviço permanente
+
+- Crie `~/Library/LaunchAgents/com.local.mlx-server.plist` que execute:
+
+  ```
+  ~/mlx-server/.venv/bin/mlx_lm.server --model <repo> --host 127.0.0.1 --port 8181
+  ```
+
+  Se a etapa 2 mostrou `--chat-template-args`, acrescente
+  `--chat-template-args '{"enable_thinking": false}'` (no plist, cada argumento é um
+  `<string>` separado, sem aspas de shell). Isso garante resposta sem bloco de
+  raciocínio mesmo que o servidor ignore o campo enviado pelo delegation-core.
+- No plist use caminhos absolutos (`/Users/<usuario>/...`), o launchd não expande `~`.
+- `RunAtLoad=true`, `KeepAlive=true`, logs em `~/mlx-server/logs/stdout.log` e
+  `stderr.log` (crie a pasta antes).
+- Carregue com `launchctl bootstrap gui/$(id -u) <plist>`.
+- Verifique: `curl -s http://127.0.0.1:8181/v1/models`.
+
+## 6. Teste de compatibilidade com o delegation-core (decisivo)
+
+Rode as três chamadas abaixo e mostre o resultado de cada uma ao usuário. Não siga
+para a etapa 7 sem as três passando.
+
+```bash
+# a) health: o delegation-core exige HTTP 200 aqui
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8181/health
+
+# b) exatamente o formato que o delegation-core envia
+curl -s http://127.0.0.1:8181/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default_model","messages":[{"role":"user","content":"Responda so: ok"}],
+       "max_tokens":50,"temperature":0.0,
+       "chat_template_kwargs":{"enable_thinking":false}}'
+
+# c) a resposta de (b) precisa ter texto em choices[0].message.content,
+#    sem bloco <think>, e usage.completion_tokens > 0
+```
+
+Resultados possíveis:
+
+- **Tudo passa**: siga para a etapa 7.
+- **`/health` não dá 200**: o delegation-core vai achar que o motor está fora. Pare e
+  relate a versão do `mlx-lm` e o código HTTP.
+- **`"model":"local"` dá erro** (o servidor tenta baixar um repositório chamado
+  `local`): e o esperado, e e por isso que o delegation-core manda `"default_model"`
+  com `motor_local: "mlx"`. Repita (b) com `"model":"default_model"`: tem que passar.
+- **Resposta vem com raciocínio ou vazia**: confira se o `--chat-template-args` da
+  etapa 5 foi aplicado; se não existir essa opção, relate.
+
+## 7. Instalar o delegation-core
+
+- Clone o repositório de produção (`AnonJoey/delegation-core`, branch `master`) em
+  `~/Projects/delegation-core`. Pergunte ao usuário o caminho se o clone falhar por
+  acesso.
+- Leia `README.md` e `src/delegation_core/wizard.py` antes de rodar o instalador, para
+  saber o que cada pergunta faz.
+- Rode `./install.command` (ou `./install.sh`).
+- **Não deixe o instalador baixar llama.cpp nem modelo GGUF, e não aceite o serviço de
+  inicialização do llama.cpp** (`_startup_launchd` em `wizard.py`): ele criaria um
+  segundo motor disputando a porta e a memória com o MLX. Se o wizard não oferecer
+  pular, escolha o modo agente nessa etapa e ajuste a config depois (próxima etapa).
+- Pergunte ao usuário onde fica o vault nesta máquina antes de responder `vault_path`.
+
+## 8. Apontar o delegation-core para o MLX
+
+Edite `~/.delegation_core/config.json` (faça backup antes:
+`cp config.json config.json.bak-pre-mlx-$(date +%Y%m%d-%H%M)`):
+
+```json
+{
+  "engine_mode": "hybrid",
+  "motor_local": "mlx",
+  "llama_port": 8181,
+  "llama_binary": "/Users/<usuario>/mlx-server/.venv/bin/mlx_lm.server",
+  "llama_model": "/Users/<usuario>/.cache/huggingface/hub/models--<...>/snapshots/<hash>",
+  "embed_backend": "llamacpp",
+  "embed_llama_binary": "/opt/homebrew/bin/llama-server",
+  "embed_gguf": "/Users/<usuario>/.delegation_core/models/bge-m3-f16.gguf",
+  "embed_port": 8182,
+  "budget_mode": "auto"
+}
+```
+
+Os campos `embed_*` não precisam ser escritos à mão: `delegation-core embed-llama setup`
+acha ou baixa o `llama-server`, baixa o GGUF e grava tudo (o wizard faz o mesmo no Mac).
+
+Por que cada campo:
+
+- `motor_local: "mlx"` faz o delegation-core mandar o nome de modelo que o MLX entende
+  e, se o servidor cair, subir o `mlx_lm.server` com os argumentos dele.
+- `llama_binary` aponta para o `mlx_lm.server` do venv. `llama_model` pode ser a pasta
+  do snapshot ou o id do repositorio (`mlx-community/...`); com o id, o `doctor` aceita
+  e o `mlx_lm` baixa na primeira subida.
+- `embed_backend: "llamacpp"`: o BGE roda num `llama-server --embeddings` (porta
+  `embed_port`), ao lado do `mlx_lm.server`, em vez de rodar no torch/MPS, que é o caminho
+  que já derrubou o daemon por alocação de buffer na memória unificada. O GGUF f16 dá o
+  mesmo vetor do torch (cosseno 0,99999 medido com o bge-m3), então a coleção é a mesma e
+  um índice já feito continua valendo, sem reindexar. O `llama-server` sobe sozinho na
+  primeira busca e sai junto com o processo que o subiu.
+- Num Mac que já tinha `embed_device: mps` e foi só atualizado, `embed_backend` fica em
+  `auto` e o BGE segue no torch até você rodar `delegation-core embed-llama setup`; o
+  `delegation-core doctor` avisa isso.
+- `budget_mode: auto` usa a velocidade medida (`tok_sec`) para limitar tokens por
+  tarefa. Rode a calibração depois da etapa 9 para preencher `tok_sec`.
+- Não mexa em `server_token`, `vault_path` nem nas pastas do vault.
+
+## 9. Registrar no Claude Code e verificar ponta a ponta
+
+- Confirme que o instalador registrou `delegation-core` em `~/.claude.json`
+  (`mcpServers`). Se não, registre com `claude mcp add` seguindo o README.
+- Copie `AGENT_GUIDE.md` para `~/.delegation_core/` se o instalador não copiou, e
+  garanta que `~/.claude/CLAUDE.md` o referencia.
+- Rode `delegation-core doctor` e mostre a saída.
+- Reinicie o Claude Code e, numa sessão nova: `capabilities()`, `heartbeat()` (deve dar
+  `healthy` com o motor online), e um `compress()` com um texto curto para provar que a
+  geração passa pelo MLX. Confira no `~/mlx-server/logs/stderr.log` que a requisição
+  chegou.
+
+## 10. Evitar que o Mac durma na tomada (opcional)
+
+`sudo pmset -c sleep 0` (só na tomada; na bateria o comportamento fica normal).
+
+## 11. Verificação final e entrega
+
+- Chat completion de teste com resposta de cerca de 300 tokens, medindo tok/s.
+- Uso de memória durante a geração (`memory_pressure`, `top -l 1 -o mem`).
+- Entregue ao usuário um resumo com: repositório do modelo, caminho dos dois plists,
+  onde ficam os logs (MLX e `~/.delegation_core/server.log`), como parar, reiniciar e
+  desinstalar cada serviço (`launchctl bootout ...`), resultado do teste da etapa 6 e
+  o `tok_sec` medido.
+- Grave um resumo da instalação no vault com `write_note(folder="Infrastructure", ...)`.
+
+## Regras
+
+- Nada de travessão (em dash ou en dash) em texto nenhum, inclusive notas e commits.
+- Meça antes de concluir: cada "funciona" precisa de uma saída de comando que prove.
+- Não altere o código do delegation-core nesta máquina. Defeito encontrado vira nota em
+  `Fixes/` no vault e relato ao usuário; a correção é feita no repositório de produção.
+- Antes de sobrescrever qualquer arquivo de config ou plist, faça backup e mostre o
+  que vai mudar.
