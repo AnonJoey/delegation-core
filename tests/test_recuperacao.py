@@ -222,7 +222,7 @@ def test_novo_caminho_explicito_vence(tmp_path):
     ("/home/x/Dropbox/vault/.chroma_bge", True),
     ("C:/Users/x/OneDrive - Empresa/vault/.chroma_bge", True),
     ("/Users/x/Work_Vault/.chroma_bge", False),
-    ("/home/joey/Documents/Projects_Archive/Claude Vault/.chroma_bge", False),
+    ("/home/x/Documents/Archive/Vault/.chroma_bge", False),
 ])
 def test_deteccao_de_pasta_sincronizada(caminho, esperado):
     assert recuperacao.em_pasta_sincronizada(Path(caminho)) is esperado

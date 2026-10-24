@@ -94,12 +94,12 @@ def test_duas_escritas_concorrentes_nao_perdem_entrada(tmp_path):
     script.write_text(programa, encoding="utf-8")
 
     procs = [subprocess.Popen([sys.executable, str(script), str(alvo), nome])
-             for nome in ("soteria", "pessoal")]
+             for nome in ("trabalho", "pessoal")]
     for p in procs:
         assert p.wait(timeout=60) == 0
 
     final = json.loads(alvo.read_text(encoding="utf-8"))
-    assert set(final) == {"soteria", "pessoal"}, (
+    assert set(final) == {"trabalho", "pessoal"}, (
         f"uma entrada foi perdida: sobrou {sorted(final)}")
 
 

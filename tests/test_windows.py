@@ -127,14 +127,14 @@ def test_open_twice_is_idempotent(sandbox):
 # ── workspaces ───────────────────────────────────────────────────────────────
 
 def test_save_workspace_excludes_self(sandbox):
-    out = windows.save_workspace("soteria")
+    out = windows.save_workspace("trabalho")
     assert out["windows"] == ["clickup"]
 
 
 def test_apply_restores_a_closed_member(sandbox):
-    windows.save_workspace("soteria")
+    windows.save_workspace("trabalho")
     windows.close_window("clickup")
-    windows.apply_workspace("soteria")
+    windows.apply_workspace("trabalho")
     assert "clickup" in mounted(sandbox)
 
 

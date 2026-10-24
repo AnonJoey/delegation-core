@@ -733,9 +733,9 @@ def _systemd_literal(value) -> str:
     Measured on 2026-09-03, with the unit actually loaded and
     `systemctl show -p ExecStart` asked what it understood::
 
-        written : ExecStart="/home/joey/100%hits/llama-server"
+        written : ExecStart="/home/user/100%hits/llama-server"
                     --model "/data/%name%.gguf"
-        loaded  : path=/home/joey/100/home/joeyits/llama-server
+        loaded  : path=/home/user/100/home/userits/llama-server
                   argv[]=... --model /data/<unit name>ame%.gguf
 
     `%h` became the home directory and `%n` the unit name. The service then

@@ -487,7 +487,7 @@ function buildDirTree(dirs) {
 }
 
 // The immediate parent is not guaranteed to be in the list: this vault has
-// `Projects/FITapp/audits` at depth 2 with no `Projects/FITapp` entry, because a
+// `Projects/App/audits` at depth 2 with no `Projects/App` entry, because a
 // directory holding only subdirectories and no notes of its own is not listed.
 // Looking up the literal parent leaves such a folder orphaned, and an orphan
 // becomes a root — which silently moved `audits` out from under `Projects` and

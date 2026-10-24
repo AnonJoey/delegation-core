@@ -1,6 +1,6 @@
 # delegation-core
 
-**One shared memory for every AI coding agent on your machine.** Claude Code, Claude Desktop, Codex and Antigravity all talk to a single local daemon through MCP, so they read and write the same notes, the same search index and the same local model. Nothing leaves your computer.
+A local daemon that Claude Code, Claude Desktop, Codex, Antigravity and Grok connect to through MCP. They read and write the same notes, the same search index and the same local model. Nothing leaves your computer.
 
 ## The problem
 
@@ -19,6 +19,7 @@ flowchart LR
   A[Claude Code] --> D
   B[Claude Desktop] --> D
   C[Codex / Antigravity] --> D
+  G[Grok] --> D
   D[delegation-core daemon<br/>127.0.0.1:8797, token auth]
   D --> V[(Markdown vault)]
   D --> I[(SQLite index<br/>exact search)]
@@ -185,7 +186,7 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-The suite is fast and offline, with no BGE/llama.cpp dependency (the heavier
+The suite runs offline, with no BGE/llama.cpp dependency (the heavier
 collaborators are faked), and `tests/conftest.py` keeps a run from touching the real
 `~/.delegation_core`. A test total used to be printed here and drifted to roughly half
 the real figure; run `pytest tests/ -q` for the number. They cover config, vault helpers and browsing, search scoping,
